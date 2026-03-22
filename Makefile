@@ -2,7 +2,7 @@ OBJ	=	objs
 DEP	=	dep
 EXE = ${OBJ}/bin
 
-COMMIT := $(shell git log -1 --pretty=format:"%H")
+COMMIT := $(shell git log -1 --pretty=format:"%H" 2>/dev/null || echo "unknown")
 
 ARCH =
 ifeq ($m, 32)
@@ -12,7 +12,13 @@ ifeq ($m, 64)
 ARCH = -m64
 endif
 
-CFLAGS = $(ARCH) -O3 -std=gnu11 -Wall -Wno-array-bounds -mpclmul -march=core2 -mfpmath=sse -mssse3 -fno-strict-aliasing -fno-strict-overflow -fwrapv -DAES=1 -DCOMMIT=\"${COMMIT}\" -D_GNU_SOURCE=1 -D_FILE_OFFSET_BITS=64
+UNAME_M := $(shell uname -m)
+X86_CFLAGS =
+ifneq (,$(filter $(UNAME_M),x86_64 amd64 i386 i686))
+X86_CFLAGS += -mpclmul -march=core2 -mfpmath=sse -mssse3
+endif
+
+CFLAGS = $(ARCH) -O3 -std=gnu11 -Wall -Wno-array-bounds $(X86_CFLAGS) -fno-strict-aliasing -fno-strict-overflow -fwrapv -DAES=1 -DCOMMIT=\"${COMMIT}\" -D_GNU_SOURCE=1 -D_FILE_OFFSET_BITS=64
 LDFLAGS = $(ARCH) -ggdb -rdynamic -lm -lrt -lcrypto -lz -lpthread -lcrypto
 
 LIB = ${OBJ}/lib
@@ -100,4 +106,3 @@ clean:
 	rm -rf ${OBJ} ${DEP} ${EXE} || true
 
 force-clean: clean
-

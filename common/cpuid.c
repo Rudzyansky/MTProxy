@@ -19,7 +19,12 @@
 */
 
 #include <assert.h>
+#if defined(__i386__) || defined(__x86_64__)
 #include <cpuid.h>
+#define KDB_HAS_CPUID 1
+#else
+#define KDB_HAS_CPUID 0
+#endif
 
 #include "cpuid.h"
 
@@ -33,6 +38,7 @@ kdb_cpuid_t *kdb_cpuid (void) {
     return &cached;
   }
 
+#if KDB_HAS_CPUID
   unsigned int a;
   assert(
     __get_cpuid(1,
@@ -42,6 +48,11 @@ kdb_cpuid_t *kdb_cpuid (void) {
         (unsigned int*) &cached.edx
     ) != 0
   );
+#else
+  cached.ebx = 0;
+  cached.ecx = 0;
+  cached.edx = 0;
+#endif
 
   cached.magic = CPUID_MAGIC;
   return &cached;

@@ -32,6 +32,12 @@
 #include "kprintf.h"
 #include "cpuid.h"
 
+#if defined(__i386__) || defined(__x86_64__)
+#define KDB_USE_X86_CRC32 1
+#else
+#define KDB_USE_X86_CRC32 0
+#endif
+
 static unsigned crc32c_table[256] = {
 0x00000000, 0xf26b8303, 0xe13b70f7, 0x1350f3f4,
 0xc79a971f, 0x35f1141c, 0x26a1e7e8, 0xd4ca64eb,
@@ -303,7 +309,7 @@ static unsigned crc32c_table0[256] = {
 #define CRC32C_REFLECTED_X8191 0xcdc220ddll
 #define CRC32C_REFLECTED_X16383 0x1acaec54ll
 
-#ifdef __LP64__
+#if KDB_USE_X86_CRC32 && defined(__LP64__)
 static unsigned crc32c_partial_sse42 (const void *data, long len, unsigned crc) {
   const char *p = data;
   unsigned long long c = crc;
@@ -527,7 +533,7 @@ static unsigned crc32c_partial_sse42_clmul (const void *data, long len, unsigned
   return crc;
 }
 
-#else
+#elif KDB_USE_X86_CRC32
 static unsigned crc32c_partial_sse42 (const void *data, long len, unsigned crc) {
   const char *p = data;
   while ((((uintptr_t) p) & 3) && (len > 0)) {
@@ -614,6 +620,7 @@ static unsigned crc32c_combine_generic (unsigned crc1, unsigned crc2, int64_t le
   return gf32_combine_generic (crc32c_powers, crc1, len2) ^ crc2;
 }
 
+#if KDB_USE_X86_CRC32 && defined(__LP64__)
 static unsigned crc32c_combine_clmul (unsigned crc1, unsigned crc2, int64_t len2) {
   static unsigned int crc32c_powers[252] __attribute__ ((aligned(16)));
   if (len2 <= 0) {
@@ -639,24 +646,30 @@ static unsigned crc32c_combine_clmul (unsigned crc1, unsigned crc2, int64_t len2
   );
   return crc ^ ((unsigned) (T >> 32)) ^ crc2;
 }
+#else
+static unsigned __attribute__ ((unused)) crc32c_combine_clmul (unsigned crc1, unsigned crc2, int64_t len2) {
+  return crc32c_combine_generic (crc1, crc2, len2);
+}
+#endif
 
 static void crc32c_init (void) __attribute__ ((constructor));
 void crc32c_init (void) {
-  kdb_cpuid_t *p = kdb_cpuid ();
   compute_crc32c_combine = &crc32c_combine_generic;
+#if KDB_USE_X86_CRC32
+  kdb_cpuid_t *p = kdb_cpuid ();
   if (p->ecx & (1 << 20)) {
     crc32c_partial = crc32c_partial_sse42;
-#ifdef __LP64__
+#if defined(__LP64__)
     if (p->ecx & 2) {
       crc32c_partial = crc32c_partial_sse42_clmul;
       compute_crc32c_combine = &crc32c_combine_clmul;
     }
 #endif
-  } else {
-    crc32c_partial = &crc32c_partial_four_tables;
+    return;
   }
+#endif
+  crc32c_partial = &crc32c_partial_four_tables;
 }
 
 crc32_partial_func_t crc32c_partial;
 crc32_combine_func_t compute_crc32c_combine;
-
