@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PORT="${PORT:-443}"
+WORKERS="${WORKERS:-0}"
+PUBLIC_IP="$(curl -4fsSL https://api.ipify.org)"
+_PRIVATE_IP="$(ip -4 route get 1.1.1.1 | awk '/src/ {print $7; exit}')"
+if [[ "$_PRIVATE_IP" -ne "$PUBLIC_IP" ]]; then
+  PRIVATE_IP="$_PRIVATE_IP"
+fi
+
+INSTALL_DIR="/opt/MTProxy"
+CONF_DIR="/etc/mtproxy"
+STATE_DIR="/var/lib/mtproxy"
+BIN="/usr/local/bin/mtproto-proxy"
+DEFAULTS_FILE="/etc/default/mtproxy"
+SERVICE_FILE="/etc/systemd/system/mtproxy.service"
+UPDATE_SCRIPT="/usr/local/sbin/mtproxy-update-config"
+UPDATE_SERVICE="/etc/systemd/system/mtproxy-update.service"
+UPDATE_TIMER="/etc/systemd/system/mtproxy-update.timer"
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "ERROR: run this script as root"
+  exit 1
+fi
+
+echo "[1/10] Checking that port ${PORT} is free"
+if ss -ltn "( sport = :${PORT} )" | grep -q ":${PORT}"; then
+  echo "ERROR: port ${PORT} is already in use"
+  ss -ltnp | grep ":${PORT}" || true
+  exit 1
+fi
+
+echo "[2/10] Installing required packages (Oracle Linux 8)"
+dnf -y makecache
+dnf -y install \
+  git curl openssl ca-certificates \
+  gcc make glibc-devel openssl-devel zlib-devel \
+  iproute
+
+echo "[3/10] Creating system user mtproxy"
+if ! id mtproxy >/dev/null 2>&1; then
+  useradd --system --home-dir "${STATE_DIR}" --create-home --shell /sbin/nologin mtproxy
+fi
+
+echo "[4/10] Cloning source code"
+rm -rf "${INSTALL_DIR}"
+git clone https://github.com/Rudzyansky/MTProxy "${INSTALL_DIR}"
+
+echo "[5/10] Building MTProxy"
+make -C "${INSTALL_DIR}"
+install -m 0755 "${INSTALL_DIR}/objs/bin/mtproto-proxy" "${BIN}"
+
+echo "[6/10] Preparing directories and configs"
+install -d -m 0750 -o root -g mtproxy "${CONF_DIR}"
+install -d -m 0750 -o mtproxy -g mtproxy "${STATE_DIR}"
+
+curl -fsSL https://core.telegram.org/getProxySecret -o "${CONF_DIR}/proxy-secret"
+curl -fsSL https://core.telegram.org/getProxyConfig -o "${CONF_DIR}/proxy-multi.conf"
+
+SECRET="$(openssl rand -hex 16)"
+printf '%s\n' "${SECRET}" > "${CONF_DIR}/user-secret"
+
+chown root:mtproxy "${CONF_DIR}/proxy-secret" "${CONF_DIR}/proxy-multi.conf" "${CONF_DIR}/user-secret"
+chmod 0640 "${CONF_DIR}/proxy-secret" "${CONF_DIR}/proxy-multi.conf" "${CONF_DIR}/user-secret"
+
+echo "[7/10] Writing service settings"
+cat > "${DEFAULTS_FILE}" <<CFG
+PORT=${PORT}
+WORKERS=${WORKERS}
+PRIVATE_IP=$PRIVATE_IP
+PUBLIC_IP=$PUBLIC_IP
+PROXY_TAG=
+VERBOSE=vv
+CFG
+
+cat > "${SERVICE_FILE}" <<'UNIT'
+[Unit]
+Description=Telegram MTProxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/mtproxy
+ExecStart=/bin/sh -lc '/usr/local/bin/mtproto-proxy ${VERBOSE:+-$VERBOSE} -u mtproxy ${PRIVATE_IP:+--nat-info "${PRIVATE_IP}:${PUBLIC_IP}"} ${PROXY_TAG:+-P "$PROXY_TAG"} -p 8888 -H "$PORT" ${WORKERS:+-M "$WORKERS"} -S "$(cat /etc/mtproxy/user-secret)" --aes-pwd /etc/mtproxy/proxy-secret /etc/mtproxy/proxy-multi.conf'
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+echo "[8/10] Adding daily proxy-multi.conf refresh"
+cat > "${UPDATE_SCRIPT}" <<'UPD'
+#!/bin/sh
+set -eu
+
+TMP="$(mktemp)"
+trap 'rm -f "$TMP"' EXIT
+
+curl -fsSL https://core.telegram.org/getProxyConfig -o "$TMP"
+install -o root -g mtproxy -m 0640 "$TMP" /etc/mtproxy/proxy-multi.conf
+systemctl try-restart mtproxy.service
+UPD
+
+chmod 0755 "${UPDATE_SCRIPT}"
+
+cat > "${UPDATE_SERVICE}" <<'USVC'
+[Unit]
+Description=Refresh Telegram MTProxy config
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mtproxy-update-config
+USVC
+
+cat > "${UPDATE_TIMER}" <<'UTMR'
+[Unit]
+Description=Daily refresh for Telegram MTProxy config
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UTMR
+
+echo "[9/10] Enabling services"
+systemctl daemon-reload
+systemctl enable --now mtproxy.service
+systemctl enable --now mtproxy-update.timer
+
+echo "[10/10] Preparing client connection links"
+CLIENT_SECRET="dd${SECRET}"
+
+echo
+echo "========== DONE =========="
+echo "Service status:"
+systemctl --no-pager --full status mtproxy.service || true
+echo
+echo "Client secret:"
+echo "${SECRET}"
+echo
+echo "tg:// link"
+echo "tg://proxy?server=${PUBLIC_IP}&port=${PORT}&secret=${CLIENT_SECRET}"
+echo
+echo "https://t.me/proxy link"
+echo "https://t.me/proxy?server=${PUBLIC_IP}&port=${PORT}&secret=${CLIENT_SECRET}"
+echo
+echo "Local stats endpoint:"
+echo "curl -s http://127.0.0.1:8888/stats"
+echo
+echo "You can go to https://t.me/MTProxybot and link your MTProxy"
+echo "Receive your TAG and write it to ${DEFAULTS_FILE} as PROXY_TAG"
