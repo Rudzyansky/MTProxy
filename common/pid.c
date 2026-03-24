@@ -32,6 +32,7 @@
 #include <time.h>
 #include <sys/types.h>
 
+#include "kprintf.h"
 #include "common/pid.h"
 
 npid_t PID;
@@ -39,11 +40,22 @@ npid_t PID;
 void init_common_PID (void) {
   if (!PID.pid) {
     int p = getpid ();
-    assert (!(p & 0xffff0000));
-    PID.pid = p;
+    unsigned short wire_pid = (unsigned short) p;
+
+    if (p & 0xffff0000) {
+      if (!wire_pid) {
+        wire_pid = 0xffff;
+      }
+      vkprintf (1, "OS pid %d does not fit in wire process_id, truncating to %u\n", p, (unsigned) wire_pid);
+    }
+
+    PID.pid = wire_pid;
   }
   if (!PID.utime) {
     PID.utime = time (0);
+    if (!PID.utime) {
+      PID.utime = 1;
+    }
   }
 }
 
@@ -84,4 +96,3 @@ int process_id_is_newer (struct process_id *a, struct process_id *b) {
   if (x && x <= 0x3fff) { return 1; }
   return 0;
 }
-
